@@ -14,10 +14,16 @@
 
 #include <ros/ros.h>
 #include <ros/package.h>
+#include <sensor_msgs/image_encodings.h>
+
+#include <opencv2/imgproc/imgproc.hpp>
+#include <cv_bridge/cv_bridge.h>
 
 using namespace CVD;
 using namespace std;
 using namespace GVars3;
+
+namespace imgenc = sensor_msgs::image_encodings;
 
 //Weiss{
 Vector<NUMTRACKERCAMPARAMETERS> camparams;
@@ -40,7 +46,7 @@ int main(int argc, char** argv)
 
   try
   {
-    std::cout<<"Gui is "<<(PtamParameters::fixparams().gui ? "on" : "off")<<std::endl; //make the singleton instantiate
+    std::cout << "Gui is " << (PtamParameters::fixparams().gui ? "on" : "off") << std::endl; //make the singleton instantiate
     CameraCalibrator c;
     c.Run();
   }
@@ -55,19 +61,46 @@ int main(int argc, char** argv)
 
 void CameraCalibrator::imageCallback(const sensor_msgs::ImageConstPtr & img)
 {
+    switch (imgenc::numChannels(img->encoding))
+    {
+      case 1:
+      {
+        CVD::ImageRef size(img->width, img->height);
+        mCurrentImage.resize(size);
 
-  ROS_ASSERT(img->encoding == sensor_msgs::image_encodings::MONO8 && img->step == img->width);
+        CVD::BasicImage<CVD::byte> img_tmp((CVD::byte *)&img->data[0], size);
+        CVD::copy(img_tmp, mCurrentImage);
+        mNewImage = true;
+      }
+        break;
+      case 3:
+      {
+        cv::Mat img8uC3 = cv_bridge::toCvShare(img, imgenc::RGB8)->image;
+        cv::Mat img8u;
+        cv::cvtColor(img8uC3, img8u, CV_BGR2GRAY);
+        CVD::ImageRef size(img8u.cols, img8u.rows);
+        mCurrentImage.resize(size);
 
-  CVD::ImageRef size(img->width, img->height);
-  mCurrentImage.resize(size);
+        CVD::BasicImage<CVD::byte> img_tmp((CVD::byte *)img8u.data, size);
+        CVD::copy(img_tmp, mCurrentImage);
+        mNewImage = true;
+      }
+        break;
+//      case 4:
+//        img = cv_bridge::toCvShare(msg, imgenc::RGBA8)->image;
+//        break;
+      default:
+        ROS_ERROR("unsupported image color encoding.");
+        return;
+        ;
+    }
+//  ROS_ASSERT(img->encoding == sensor_msgs::image_encodings::MONO8 && img->step == img->width);
 
-  CVD::BasicImage<CVD::byte> img_tmp((CVD::byte *)&img->data[0], size);
-  CVD::copy(img_tmp, mCurrentImage);
-  mNewImage = true;
+
 }
 
 CameraCalibrator::CameraCalibrator() :
-      mCamera("Camera"), mbDone(false), mCurrentImage(CVD::ImageRef(752, 480)), mDoOptimize(false), mNewImage(false)
+    mCamera("Camera"), mbDone(false), mCurrentImage(CVD::ImageRef(752, 480)), mDoOptimize(false), mNewImage(false)
 {
   ros::NodeHandle nh;
   image_transport::ImageTransport it(nh);
@@ -160,7 +193,7 @@ void CameraCalibrator::Run()
     }
     else
     {
-      if(mDoOptimize)
+      if (mDoOptimize)
         OptimizeOneStep();
       GUI.ParseLine("CalibMenu.ShowMenu Opti");
       int nToShow = *mgvnShowImage - 1;
@@ -272,73 +305,64 @@ void CameraCalibrator::OptimizeOneStep()
   mJTJ = Identity; // Weak stabilizing prior
   vJTe = Zeros;
 
-  if(*mgvnDisableDistortion) mCamera.DisableRadialDistortion();
-
+  if (*mgvnDisableDistortion)
+    mCamera.DisableRadialDistortion();
 
   double dSumSquaredError = 0.0;
   int nTotalMeas = 0;
 
-  for(int n=0; n<nViews; n++)
+  for (int n = 0; n < nViews; n++)
   {
-    int nMotionBase = n*6;
+    int nMotionBase = n * 6;
     vector<CalibImage::ErrorAndJacobians> vEAJ = mvCalibImgs[n].Project(mCamera);
 
-    for(unsigned int i=0; i<vEAJ.size(); i++)
+    for (unsigned int i = 0; i < vEAJ.size(); i++)
     {
       CalibImage::ErrorAndJacobians &EAJ = vEAJ[i];
       // All the below should be +=, but the MSVC compiler doesn't seem to understand that. :(
-      mJTJ.slice(nMotionBase, nMotionBase, 6, 6) = 
-          mJTJ.slice(nMotionBase, nMotionBase, 6, 6) + EAJ.m26PoseJac.T() * EAJ.m26PoseJac;
-      mJTJ.slice(nCamParamBase, nCamParamBase, NUMTRACKERCAMPARAMETERS, NUMTRACKERCAMPARAMETERS) = 
-          mJTJ.slice(nCamParamBase, nCamParamBase, NUMTRACKERCAMPARAMETERS, NUMTRACKERCAMPARAMETERS) + EAJ.m2NCameraJac.T() * EAJ.m2NCameraJac;
-      mJTJ.slice(nMotionBase, nCamParamBase, 6, NUMTRACKERCAMPARAMETERS) =
-          mJTJ.slice(nMotionBase, nCamParamBase, 6, NUMTRACKERCAMPARAMETERS) + EAJ.m26PoseJac.T() * EAJ.m2NCameraJac;
-      mJTJ.T().slice(nMotionBase, nCamParamBase, 6, NUMTRACKERCAMPARAMETERS) = 
-          mJTJ.T().slice(nMotionBase, nCamParamBase, 6, NUMTRACKERCAMPARAMETERS) + EAJ.m26PoseJac.T() * EAJ.m2NCameraJac;
+      mJTJ.slice(nMotionBase, nMotionBase, 6, 6) = mJTJ.slice(nMotionBase, nMotionBase, 6, 6)
+          + EAJ.m26PoseJac.T() * EAJ.m26PoseJac;
+      mJTJ.slice(nCamParamBase, nCamParamBase, NUMTRACKERCAMPARAMETERS, NUMTRACKERCAMPARAMETERS) = mJTJ.slice(
+          nCamParamBase, nCamParamBase, NUMTRACKERCAMPARAMETERS, NUMTRACKERCAMPARAMETERS)
+          + EAJ.m2NCameraJac.T() * EAJ.m2NCameraJac;
+      mJTJ.slice(nMotionBase, nCamParamBase, 6, NUMTRACKERCAMPARAMETERS) = mJTJ.slice(nMotionBase, nCamParamBase, 6,
+                                                                                      NUMTRACKERCAMPARAMETERS)
+          + EAJ.m26PoseJac.T() * EAJ.m2NCameraJac;
+      mJTJ.T().slice(nMotionBase, nCamParamBase, 6, NUMTRACKERCAMPARAMETERS) = mJTJ.T().slice(nMotionBase,
+                                                                                              nCamParamBase, 6,
+                                                                                              NUMTRACKERCAMPARAMETERS)
+          + EAJ.m26PoseJac.T() * EAJ.m2NCameraJac;
       // Above does twice the work it needs to, but who cares..
 
-      vJTe.slice(nMotionBase,6) = 
-          vJTe.slice(nMotionBase,6) + EAJ.m26PoseJac.T() * EAJ.v2Error;
-      vJTe.slice(nCamParamBase,NUMTRACKERCAMPARAMETERS) = 
-          vJTe.slice(nCamParamBase,NUMTRACKERCAMPARAMETERS) + EAJ.m2NCameraJac.T() * EAJ.v2Error;
+      vJTe.slice(nMotionBase, 6) = vJTe.slice(nMotionBase, 6) + EAJ.m26PoseJac.T() * EAJ.v2Error;
+      vJTe.slice(nCamParamBase, NUMTRACKERCAMPARAMETERS) = vJTe.slice(nCamParamBase, NUMTRACKERCAMPARAMETERS)
+          + EAJ.m2NCameraJac.T() * EAJ.v2Error;
 
       dSumSquaredError += EAJ.v2Error * EAJ.v2Error;
       ++nTotalMeas;
     }
   };
 
-  if(nTotalMeas == 0)
+  if (nTotalMeas == 0)
   {
-    ROS_WARN_THROTTLE(2, "No new measurements, this can happen for wide angle cameras when \"Camera.Project()\" gets invalid");
+    ROS_WARN_THROTTLE(
+        2, "No new measurements, this can happen for wide angle cameras when \"Camera.Project()\" gets invalid");
     return;
   }
 
   double lastPixelError = mdMeanPixelError;
   mdMeanPixelError = sqrt(dSumSquaredError / nTotalMeas);
 
-  if(std::abs(lastPixelError - mdMeanPixelError) < 1e-6)
+  if (std::abs(lastPixelError - mdMeanPixelError) < 1e-6)
     mDoOptimize = false;
 
   SVD<> svd(mJTJ);
   Vector<> vUpdate(nDim);
-  vUpdate= svd.backsub(vJTe);
+  vUpdate = svd.backsub(vJTe);
   vUpdate *= 0.1; // Slow down because highly nonlinear...
-  for(int n=0; n<nViews; n++)
+  for (int n = 0; n < nViews; n++)
     mvCalibImgs[n].mse3CamFromWorld = SE3<>::exp(vUpdate.slice(n * 6, 6)) * mvCalibImgs[n].mse3CamFromWorld;
   mCamera.UpdateParams(vUpdate.slice(nCamParamBase, NUMTRACKERCAMPARAMETERS));
-};
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+}
+;
 
